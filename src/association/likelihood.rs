@@ -99,7 +99,7 @@ impl LikelihoodResult {
 /// along with the posterior parameters after a Kalman update.
 ///
 /// # Formula
-/// - Innovation covariance: `Z = C × Σ × Cᵀ + Q`
+/// - Innovation covariance: `Z = C × Σ × Cᵀ + R_k`
 /// - Innovation: `ν = z - C × μ`
 /// - Mahalanobis distance: `d² = νᵀ × Z⁻¹ × ν`
 /// - Log-likelihood: `-0.5 × (n×ln(2π) + ln|Z| + d²)`
@@ -113,6 +113,9 @@ impl LikelihoodResult {
 /// * `measurement` - Measurement vector
 /// * `sensor` - Sensor model parameters
 /// * `workspace` - Reusable workspace (for efficiency)
+/// * `measurement_noise_override` - Optional per-detection measurement noise covariance.
+///   When `Some(R_k)`, overrides `sensor.measurement_noise` in the innovation covariance.
+///   When `None`, the sensor's default measurement noise is used.
 ///
 /// # Returns
 /// Likelihood result including posterior parameters
@@ -122,6 +125,7 @@ pub fn compute_likelihood(
     measurement: &DVector<f64>,
     sensor: &SensorModel,
     workspace: &mut LikelihoodWorkspace,
+    measurement_noise_override: Option<&DMatrix<f64>>,
 ) -> LikelihoodResult {
     let x_dim = prior_mean.len();
     let z_dim = measurement.len();
@@ -129,13 +133,16 @@ pub fn compute_likelihood(
     // Ensure workspace is correctly sized
     workspace.resize(x_dim, z_dim);
 
-    // Innovation covariance: Z = C × Σ × Cᵀ + Q
+    // Select the measurement noise: per-detection override or sensor default
+    let noise = measurement_noise_override.unwrap_or(&sensor.measurement_noise);
+
+    // Innovation covariance: Z = C × Σ × Cᵀ + R_k
     // Using temp_matrix to avoid allocation: temp = Σ × Cᵀ
     workspace.temp_matrix = prior_cov * sensor.observation_matrix.transpose();
 
-    // Z = C × temp + Q = C × Σ × Cᵀ + Q
+    // Z = C × temp + R_k = C × Σ × Cᵀ + R_k
     workspace.innovation_cov =
-        &sensor.observation_matrix * &workspace.temp_matrix + &sensor.measurement_noise;
+        &sensor.observation_matrix * &workspace.temp_matrix + noise;
 
     // Invert Z (with numerical stability check)
     workspace.innovation_cov_inv = workspace
@@ -187,19 +194,26 @@ pub fn compute_likelihood(
 /// Compute log-likelihood only (without posterior update)
 ///
 /// More efficient when posterior parameters aren't needed (e.g., gating).
+///
+/// # Arguments
+/// * `measurement_noise_override` - Optional per-detection R_k override.
 #[inline]
 pub fn compute_log_likelihood(
     prior_mean: &DVector<f64>,
     prior_cov: &DMatrix<f64>,
     measurement: &DVector<f64>,
     sensor: &SensorModel,
+    measurement_noise_override: Option<&DMatrix<f64>>,
 ) -> f64 {
     let z_dim = measurement.len();
 
-    // Innovation covariance: Z = C × Σ × Cᵀ + Q
+    // Select the measurement noise: per-detection override or sensor default
+    let noise = measurement_noise_override.unwrap_or(&sensor.measurement_noise);
+
+    // Innovation covariance: Z = C × Σ × Cᵀ + R_k
     let innovation_cov =
         &sensor.observation_matrix * prior_cov * sensor.observation_matrix.transpose()
-            + &sensor.measurement_noise;
+            + noise;
 
     // Invert Z
     let innovation_cov_inv = match innovation_cov.clone().try_inverse() {
@@ -256,7 +270,7 @@ mod tests {
         let prior_cov = DMatrix::identity(4, 4) * 10.0;
         let measurement = DVector::from_vec(vec![0.1, 0.1]);
 
-        let result = compute_likelihood(&prior_mean, &prior_cov, &measurement, &sensor, &mut ws);
+        let result = compute_likelihood(&prior_mean, &prior_cov, &measurement, &sensor, &mut ws, None);
 
         // Posterior mean should be pulled toward measurement
         // Observation is [x, y] so mean[0] (x) and mean[1] (y) should move toward 0.1
@@ -275,7 +289,7 @@ mod tests {
         let prior_cov = DMatrix::identity(4, 4);
         let measurement = DVector::from_vec(vec![0.0, 0.0]);
 
-        let log_lik = compute_log_likelihood(&prior_mean, &prior_cov, &measurement, &sensor);
+        let log_lik = compute_log_likelihood(&prior_mean, &prior_cov, &measurement, &sensor, None);
 
         // Perfect measurement match should give positive log-likelihood ratio
         // (measurement exactly at predicted position)
@@ -298,12 +312,13 @@ mod tests {
             &close_measurement,
             &sensor,
             &mut ws,
+            None,
         );
 
         // Far measurement
         let far_measurement = DVector::from_vec(vec![100.0, 100.0]);
         let far_result =
-            compute_likelihood(&prior_mean, &prior_cov, &far_measurement, &sensor, &mut ws);
+            compute_likelihood(&prior_mean, &prior_cov, &far_measurement, &sensor, &mut ws, None);
 
         // Close measurement should have higher likelihood ratio
         assert!(close_result.log_likelihood_ratio > far_result.log_likelihood_ratio);
