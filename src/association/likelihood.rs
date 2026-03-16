@@ -126,6 +126,7 @@ pub fn compute_likelihood(
     sensor: &SensorModel,
     workspace: &mut LikelihoodWorkspace,
     measurement_noise_override: Option<&DMatrix<f64>>,
+    pd_override: Option<f64>,
 ) -> LikelihoodResult {
     let x_dim = prior_mean.len();
     let z_dim = measurement.len();
@@ -169,9 +170,11 @@ pub fn compute_likelihood(
     let log_norm = -0.5 * (z_dim as f64 * (2.0 * PI).ln() + log_det);
     let log_lik = log_norm - 0.5 * mahal;
 
+    let p_d = pd_override.unwrap_or(sensor.detection_probability);
+
     // Log-likelihood ratio: includes detection probability and clutter density
     let log_likelihood_ratio =
-        log_lik + sensor.detection_probability.ln() - sensor.clutter_density().ln();
+        log_lik + p_d.ln() - sensor.clutter_density().ln();
 
     // Kalman gain: K = Σ × Cᵀ × Z⁻¹
     let kalman_gain = &workspace.temp_matrix * &workspace.innovation_cov_inv;
@@ -204,6 +207,7 @@ pub fn compute_log_likelihood(
     measurement: &DVector<f64>,
     sensor: &SensorModel,
     measurement_noise_override: Option<&DMatrix<f64>>,
+    pd_override: Option<f64>,
 ) -> f64 {
     let z_dim = measurement.len();
 
@@ -232,8 +236,10 @@ pub fn compute_log_likelihood(
     let log_norm = -0.5 * (z_dim as f64 * (2.0 * PI).ln() + log_det);
     let log_lik = log_norm - 0.5 * mahal;
 
+    let p_d = pd_override.unwrap_or(sensor.detection_probability);
+
     // Return log-likelihood ratio
-    log_lik + sensor.detection_probability.ln() - sensor.clutter_density().ln()
+    log_lik + p_d.ln() - sensor.clutter_density().ln()
 }
 
 #[cfg(test)]
@@ -270,7 +276,7 @@ mod tests {
         let prior_cov = DMatrix::identity(4, 4) * 10.0;
         let measurement = DVector::from_vec(vec![0.1, 0.1]);
 
-        let result = compute_likelihood(&prior_mean, &prior_cov, &measurement, &sensor, &mut ws, None);
+        let result = compute_likelihood(&prior_mean, &prior_cov, &measurement, &sensor, &mut ws, None, None);
 
         // Posterior mean should be pulled toward measurement
         // Observation is [x, y] so mean[0] (x) and mean[1] (y) should move toward 0.1
@@ -289,7 +295,7 @@ mod tests {
         let prior_cov = DMatrix::identity(4, 4);
         let measurement = DVector::from_vec(vec![0.0, 0.0]);
 
-        let log_lik = compute_log_likelihood(&prior_mean, &prior_cov, &measurement, &sensor, None);
+        let log_lik = compute_log_likelihood(&prior_mean, &prior_cov, &measurement, &sensor, None, None);
 
         // Perfect measurement match should give positive log-likelihood ratio
         // (measurement exactly at predicted position)
@@ -313,12 +319,13 @@ mod tests {
             &sensor,
             &mut ws,
             None,
+            None,
         );
 
         // Far measurement
         let far_measurement = DVector::from_vec(vec![100.0, 100.0]);
         let far_result =
-            compute_likelihood(&prior_mean, &prior_cov, &far_measurement, &sensor, &mut ws, None);
+            compute_likelihood(&prior_mean, &prior_cov, &far_measurement, &sensor, &mut ws, None, None);
 
         // Close measurement should have higher likelihood ratio
         assert!(close_result.log_likelihood_ratio > far_result.log_likelihood_ratio);

@@ -436,18 +436,24 @@ impl<A: Associator, M: Merger> MultisensorLmbFilter<A, M> {
         })
     }
 
-    /// Step the filter with per-detection covariance overrides.
-    ///
-    /// This method is identical to `step()` but accepts `Vec<Vec<Measurement>>`
-    /// instead of `Vec<Vec<DVector<f64>>>`, allowing per-detection measurement
-    /// noise covariance to be passed through to the association builder.
-    ///
-    /// Each `Measurement` can carry an optional `noise_covariance` that overrides
-    /// the sensor's default `measurement_noise` during likelihood computation.
     pub fn step_with_covariances<R: rand::Rng>(
         &mut self,
         rng: &mut R,
         measurements: &[Vec<crate::lmb::Measurement>],
+        timestep: usize,
+    ) -> Result<StateEstimate, FilterError> {
+        self.step_with_visibility(rng, measurements, None, timestep)
+    }
+
+    /// Step the filter with per-detection covariance overrides and per-track visibility masks.
+    ///
+    /// Per-track visibility allows for spatially-varying detection probability (FOV awareness).
+    /// `visibility[sensor_idx][track_idx]` stores the Pd for that pair.
+    pub fn step_with_visibility<R: rand::Rng>(
+        &mut self,
+        rng: &mut R,
+        measurements: &[Vec<crate::lmb::Measurement>],
+        visibility: Option<&[Vec<f64>]>,
         timestep: usize,
     ) -> Result<StateEstimate, FilterError> {
         let num_sensors = self.num_sensors();
@@ -469,13 +475,13 @@ impl<A: Associator, M: Merger> MultisensorLmbFilter<A, M> {
         // STEP 3: Measurement update with per-detection covariances
         let has_any_measurements = measurements.iter().any(|m| !m.is_empty());
 
-        if has_any_measurements && !self.tracks.is_empty() {
+        if !self.tracks.is_empty() {
             let is_sequential = self.merger.is_sequential();
             let mut per_sensor_tracks: Vec<Vec<Track>> = Vec::with_capacity(num_sensors);
             let mut current_tracks = self.tracks.clone();
 
-            for (sensor, sensor_measurements) in
-                self.sensors.sensors.iter().zip(measurements.iter())
+            for (sensor_idx, (sensor, sensor_measurements)) in
+                self.sensors.sensors.iter().zip(measurements.iter()).enumerate()
             {
                 let mut sensor_tracks = if is_sequential {
                     current_tracks.clone()
@@ -483,8 +489,14 @@ impl<A: Associator, M: Merger> MultisensorLmbFilter<A, M> {
                     self.tracks.clone()
                 };
 
+                let sensor_visibility = visibility.map(|v| &v[sensor_idx]);
+
                 if !sensor_measurements.is_empty() {
                     let mut builder = AssociationBuilder::new(&sensor_tracks, sensor);
+                    if let Some(pd) = sensor_visibility {
+                        builder = builder.with_detection_probabilities(pd);
+                    }
+                    
                     // Use build_with_covariances to pass per-detection R_k
                     let matrices = builder.build_with_covariances(sensor_measurements);
 
@@ -496,13 +508,18 @@ impl<A: Associator, M: Merger> MultisensorLmbFilter<A, M> {
                     self.updater
                         .update(&mut sensor_tracks, &result, &matrices.posteriors);
 
-                    super::super::common_ops::update_existence_from_marginals(
+                    super::super::common_ops::update_existence_from_marginals_with_pd(
                         &mut sensor_tracks,
                         &result,
+                        sensor_visibility.map(|v| v.as_slice()),
+                        sensor.detection_probability,
                     );
                 } else {
-                    let p_d = sensor.detection_probability;
-                    for track in &mut sensor_tracks {
+                    for (track_idx, track) in sensor_tracks.iter_mut().enumerate() {
+                        let p_d = sensor_visibility
+                            .map(|v| v[track_idx])
+                            .unwrap_or(sensor.detection_probability);
+                            
                         track.existence = crate::components::update::update_existence_no_detection(
                             track.existence,
                             p_d,

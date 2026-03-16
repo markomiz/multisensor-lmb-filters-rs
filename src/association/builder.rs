@@ -253,6 +253,7 @@ pub struct AssociationBuilder<'a> {
     tracks: &'a [Track],
     sensor: &'a SensorModel,
     workspace: LikelihoodWorkspace,
+    detection_probabilities: Option<&'a [f64]>,
 }
 
 impl<'a> AssociationBuilder<'a> {
@@ -264,7 +265,14 @@ impl<'a> AssociationBuilder<'a> {
             tracks,
             sensor,
             workspace: LikelihoodWorkspace::new(x_dim, z_dim),
+            detection_probabilities: None,
         }
+    }
+
+    /// Set per-track detection probabilities.
+    pub fn with_detection_probabilities(mut self, pd: &'a [f64]) -> Self {
+        self.detection_probabilities = Some(pd);
+        self
     }
 
     /// Build association matrices from current tracks and given measurements.
@@ -294,19 +302,14 @@ impl<'a> AssociationBuilder<'a> {
         let n = self.tracks.len();
         let m = measurements.len();
 
-        // Initialize matrices - work in LOG SPACE to avoid underflow
-        // log_l_matrix stores log-likelihood ratios: log(sum_k(r * w[k] * likelihood_ratio[k]))
-        // We use log-sum-exp to accumulate over components in log-space.
         let mut log_l_matrix = DMatrix::from_element(n, m, f64::NEG_INFINITY);
         let mut posteriors = PosteriorGrid::new(n, m);
 
-        let p_d = self.sensor.detection_probability;
         let _clutter_density = self.sensor.clutter_density();
 
         // Compute likelihoods for all (track, measurement) pairs
-        // Matching MATLAB: iterate over ALL GM components and sum weighted likelihoods
-        // Using log-sum-exp: log(sum_k exp(log_term_k)) to avoid underflow.
         for (i, track) in self.tracks.iter().enumerate() {
+            let p_d = self.detection_probabilities.map(|pd| pd[i]).unwrap_or(self.sensor.detection_probability);
             let num_components = track.components.len();
 
             // track_means[j][k] = posterior mean for measurement j, component k
@@ -389,6 +392,7 @@ impl<'a> AssociationBuilder<'a> {
                         self.sensor,
                         &mut self.workspace,
                         noise_override,
+                        Some(p_d),
                     );
 
                     // compute_likelihood returns: log(p_D / lambda * gaussian)
@@ -453,6 +457,7 @@ impl<'a> AssociationBuilder<'a> {
 
         for (i, track) in self.tracks.iter().enumerate() {
             let r = track.existence;
+            let p_d = self.detection_probabilities.map(|pd| pd[i]).unwrap_or(self.sensor.detection_probability);
 
             // eta[i] = 1 - p_D × r[i]
             eta[i] = 1.0 - p_d * r;
