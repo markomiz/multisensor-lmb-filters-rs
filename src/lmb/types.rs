@@ -93,14 +93,21 @@ pub struct Measurement {
     /// When `Some(R_k)`, overrides `SensorModel.measurement_noise` for this detection.
     /// When `None`, the sensor's default measurement noise is used.
     pub noise_covariance: Option<DMatrix<f64>>,
+    /// Optional per-detection observation matrix (C_k).
+    /// When `Some(C_k)`, overrides `SensorModel.observation_matrix` for this detection.
+    /// Use this for nonlinear/time-varying observation models, e.g. a linearised Doppler
+    /// row appended to the standard position-observation C matrix.
+    /// When `None`, the sensor's default observation matrix is used.
+    pub c_matrix: Option<DMatrix<f64>>,
 }
 
 impl Measurement {
-    /// Create a measurement using the sensor's default noise covariance.
+    /// Create a measurement using the sensor's default noise covariance and observation matrix.
     pub fn new(vector: DVector<f64>) -> Self {
         Self {
             vector,
             noise_covariance: None,
+            c_matrix: None,
         }
     }
 
@@ -109,6 +116,23 @@ impl Measurement {
         Self {
             vector,
             noise_covariance: Some(noise_covariance),
+            c_matrix: None,
+        }
+    }
+
+    /// Create a measurement with per-detection observation matrix and noise covariance overrides.
+    ///
+    /// Use when both C and R differ from the sensor defaults (e.g., a radar detection that
+    /// includes a Doppler row whose direction depends on the target bearing at detection time).
+    pub fn with_observation(
+        vector: DVector<f64>,
+        c_matrix: DMatrix<f64>,
+        noise_covariance: DMatrix<f64>,
+    ) -> Self {
+        Self {
+            vector,
+            noise_covariance: Some(noise_covariance),
+            c_matrix: Some(c_matrix),
         }
     }
 

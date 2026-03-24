@@ -328,6 +328,7 @@ impl<'a> AssociationBuilder<'a> {
             for (j, measurement) in measurements.iter().enumerate() {
                 let meas_vec = &measurement.vector;
                 let noise_override = measurement.noise_covariance.as_ref();
+                let c_override: Option<&DMatrix<f64>> = measurement.c_matrix.as_ref();
 
                 let mut meas_means = Vec::with_capacity(num_components);
                 let mut meas_covs = Vec::with_capacity(num_components);
@@ -345,16 +346,17 @@ impl<'a> AssociationBuilder<'a> {
                 // We use log-sum-exp to avoid underflow when log_term is very negative (e.g., -1000)
                 let mut log_terms = Vec::with_capacity(num_components);
 
-                // Optional Mahalanobis gating: quick rejection of implausible pairs
+                // Optional Mahalanobis gating: quick rejection of implausible pairs.
+                // Use the per-measurement C/R if provided, falling back to sensor defaults.
                 let gated_out = if let Some(gate_thresh) = self.sensor.gate_threshold {
                     // Use the primary (highest-weight) component for gating
                     if let Some(primary) = track.components.iter().max_by(
                         |a, b| a.weight.partial_cmp(&b.weight).unwrap_or(std::cmp::Ordering::Equal)
                     ) {
                         let noise = noise_override.unwrap_or(&self.sensor.measurement_noise);
-                        let innovation = meas_vec - &self.sensor.observation_matrix * &primary.mean;
-                        let innov_cov = &self.sensor.observation_matrix * &primary.covariance
-                            * self.sensor.observation_matrix.transpose() + noise;
+                        let c = c_override.unwrap_or(&self.sensor.observation_matrix);
+                        let innovation = meas_vec - c * &primary.mean;
+                        let innov_cov = c * &primary.covariance * c.transpose() + noise;
                         if let Some(inv) = innov_cov.try_inverse() {
                             let mahal = innovation.dot(&(&inv * &innovation));
                             mahal > gate_thresh
@@ -393,6 +395,7 @@ impl<'a> AssociationBuilder<'a> {
                         &mut self.workspace,
                         noise_override,
                         Some(p_d),
+                        c_override,
                     );
 
                     // compute_likelihood returns: log(p_D / lambda * gaussian)
